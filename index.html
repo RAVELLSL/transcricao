@@ -738,6 +738,45 @@
       color: var(--text-strong);
     }
 
+    .diagnostic-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .diagnostic-actions .btn {
+      min-height: 34px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      box-shadow: none;
+    }
+
+    .diagnostic-log {
+      margin: 10px 0 0;
+      padding: 10px;
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface-muted);
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .diagnostic-note {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+
     kbd {
       display: inline-flex;
       align-items: center;
@@ -980,6 +1019,7 @@
             <button class="btn" id="resumeBtn" type="button" disabled>Retomar</button>
             <button class="btn danger full" id="stopBtn" type="button" disabled>Finalizar gravação</button>
             <button class="btn ghost full" id="checkMicBtn" type="button">Verificar microfone</button>
+            <button class="btn ghost full" id="testSpeechBtn" type="button">Teste técnico da transcrição</button>
           </div>
 
           <div class="field-stack">
@@ -1000,8 +1040,9 @@
               <select id="captureMode">
                 <option value="standard" selected>Normal — contínuo</option>
                 <option value="compat">Compatibilidade — GitHub/navegador</option>
+                <option value="safe">Seguro — frase curta</option>
               </select>
-              <small>Use o modo de compatibilidade se a página publicada apresentar erro ao iniciar a fala.</small>
+              <small>Use “Compatibilidade” ou “Seguro” se a página publicada apresentar erro ao iniciar a fala.</small>
             </div>
 
             <div class="switch-row">
@@ -1119,6 +1160,12 @@
             <span id="secureStatus">Conexão: verificando...</span><br />
             <span id="apiStatus">Reconhecimento: verificando...</span><br />
             <span id="lastErrorStatus">Último erro: nenhum.</span>
+            <span class="diagnostic-note">Use “Teste técnico da transcrição” para separar erro do navegador/serviço de erro da interface.</span>
+            <div class="diagnostic-actions">
+              <button class="btn ghost" id="copyDiagnosticsBtn" type="button">Copiar diagnóstico</button>
+              <button class="btn ghost" id="clearDiagnosticsBtn" type="button">Limpar log</button>
+            </div>
+            <pre class="diagnostic-log" id="diagnosticLog" aria-live="polite">Aguardando teste...</pre>
           </div>
 
           <div class="help-card">
@@ -1129,7 +1176,7 @@
       </aside>
     </main>
 
-    <p class="footer-note">Esta é uma página HTML única. A transcrição depende do mecanismo de reconhecimento de voz do navegador e da permissão local de microfone.</p>
+    <p class="footer-note">Versão de diagnóstico avançado para GitHub Pages. Esta página HTML única depende do mecanismo de reconhecimento de voz do navegador e da permissão local de microfone.</p>
   </div>
 
   <div class="toast-zone" id="toastZone" aria-live="polite" aria-atomic="true"></div>
@@ -1160,6 +1207,7 @@
         resumeBtn: document.getElementById('resumeBtn'),
         stopBtn: document.getElementById('stopBtn'),
         checkMicBtn: document.getElementById('checkMicBtn'),
+        testSpeechBtn: document.getElementById('testSpeechBtn'),
         transcript: document.getElementById('transcript'),
         interimText: document.getElementById('interimText'),
         recordingStatus: document.getElementById('recordingStatus'),
@@ -1193,6 +1241,9 @@
         secureStatus: document.getElementById('secureStatus'),
         apiStatus: document.getElementById('apiStatus'),
         lastErrorStatus: document.getElementById('lastErrorStatus'),
+        diagnosticLog: document.getElementById('diagnosticLog'),
+        copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn'),
+        clearDiagnosticsBtn: document.getElementById('clearDiagnosticsBtn'),
         toastZone: document.getElementById('toastZone')
       };
 
@@ -1209,6 +1260,7 @@
         history: [],
         lastSavedText: '',
         lastRecognitionError: '',
+        diagnosticLines: [],
         fontSize: 18
       };
 
@@ -1221,6 +1273,7 @@
         updateControls();
         updateSupportWarning();
         updateDiagnostics();
+        logEnvironment();
         inspectPermissionQuietly();
       }
 
@@ -1275,6 +1328,7 @@
         const recognition = new SpeechRecognition();
         applyRecognitionOptions(recognition);
         recognition.maxAlternatives = 1;
+        attachRecognitionEventLoggers(recognition, 'principal');
 
         recognition.onstart = () => {
           state.listening = true;
@@ -1283,6 +1337,7 @@
           setRecordingState('recording', 'Gravando');
           startTimer();
           updateControls();
+          logDiagnostic('Reconhecimento principal iniciado. Modo: ' + (els.captureMode ? els.captureMode.value : 'standard') + '. Idioma: ' + (els.languageSelect.value || 'pt-BR') + '.', 'ok');
           showToast('Transcrição iniciada', 'Fale normalmente. O texto confirmado será enviado para o editor.', 'success');
         };
 
@@ -1302,6 +1357,7 @@
           renderInterim(interimChunk);
 
           if (finalChunk.trim()) {
+            logDiagnostic('Resultado final recebido: ' + finalChunk.trim().slice(0, 160), 'ok');
             appendRecognizedText(finalChunk);
           }
         };
@@ -1310,6 +1366,7 @@
           const errorCode = event.error || 'desconhecido';
           const message = mapRecognitionError(errorCode, event.message || '');
           state.lastRecognitionError = `${errorCode}: ${message}`;
+          logDiagnostic('Erro do reconhecimento principal: ' + state.lastRecognitionError, 'error');
           updateDiagnostics(state.lastRecognitionError);
 
           if (errorCode === 'not-allowed' || errorCode === 'service-not-allowed') {
@@ -1321,6 +1378,10 @@
             els.captureMode.value = 'compat';
             localStorage.setItem(STORAGE_KEYS.captureMode, 'compat');
             showToast('Modo de compatibilidade ativado', 'O navegador rejeitou o modo contínuo. Clique em Retomar para tentar novamente no modo compatibilidade.', 'warning');
+          } else if ((errorCode === 'network' || errorCode === 'service-not-allowed') && els.captureMode && els.captureMode.value === 'compat') {
+            els.captureMode.value = 'safe';
+            localStorage.setItem(STORAGE_KEYS.captureMode, 'safe');
+            showToast('Modo seguro ativado', 'Clique em Retomar para testar captura por frase curta, sem resultados provisórios.', 'warning');
           } else {
             showToast('Falha no reconhecimento', message, 'danger');
           }
@@ -1334,6 +1395,7 @@
 
         recognition.onend = () => {
           renderInterim('');
+          logDiagnostic('Evento end do reconhecimento principal. listening=' + state.listening + ', paused=' + state.paused + ', manualStop=' + state.manualStop + '.', 'info');
           if (state.listening) {
             state.listening = false;
             state.paused = true;
@@ -1358,6 +1420,9 @@
         els.resumeBtn.addEventListener('click', resumeRecognition);
         els.stopBtn.addEventListener('click', stopRecognition);
         els.checkMicBtn.addEventListener('click', () => requestMicPermission(true));
+        if (els.testSpeechBtn) els.testSpeechBtn.addEventListener('click', testSpeechEngine);
+        if (els.copyDiagnosticsBtn) els.copyDiagnosticsBtn.addEventListener('click', copyDiagnostics);
+        if (els.clearDiagnosticsBtn) els.clearDiagnosticsBtn.addEventListener('click', clearDiagnostics);
 
         els.transcript.addEventListener('input', () => {
           scheduleAutosave();
@@ -1386,7 +1451,8 @@
           els.captureMode.addEventListener('change', () => {
             localStorage.setItem(STORAGE_KEYS.captureMode, els.captureMode.value);
             if (state.recognition && !state.listening) applyRecognitionOptions(state.recognition);
-            const label = els.captureMode.value === 'compat' ? 'compatibilidade' : 'normal contínuo';
+            const labels = { standard: 'normal contínuo', compat: 'compatibilidade', safe: 'seguro por frase curta' };
+            const label = labels[els.captureMode.value] || 'normal contínuo';
             showToast('Modo de captura atualizado', `Modo ${label} selecionado para a próxima transcrição.`, 'success');
           });
         }
@@ -1443,7 +1509,151 @@
         const mode = els.captureMode ? els.captureMode.value : 'standard';
         recognition.lang = els.languageSelect.value || 'pt-BR';
         recognition.continuous = mode === 'standard';
-        recognition.interimResults = mode === 'standard';
+        recognition.interimResults = mode === 'standard' || mode === 'compat';
+      }
+
+      function logEnvironment() {
+        const ua = navigator.userAgent || 'indisponível';
+        logDiagnostic('Ambiente: origin=' + location.origin + '; secure=' + window.isSecureContext + '; protocol=' + location.protocol + '; recognition=' + Boolean(SpeechRecognition) + '.', 'info');
+        logDiagnostic('Navegador: ' + ua.slice(0, 240), 'info');
+      }
+
+      function logDiagnostic(message, level = 'info') {
+        const now = new Date();
+        const time = now.toLocaleTimeString('pt-BR', { hour12: false });
+        const prefix = level === 'error' ? 'ERRO' : level === 'ok' ? 'OK' : level === 'warn' ? 'AVISO' : 'INFO';
+        const line = `[${time}] ${prefix}: ${message}`;
+        state.diagnosticLines.push(line);
+        if (state.diagnosticLines.length > 80) state.diagnosticLines.shift();
+        if (els.diagnosticLog) {
+          els.diagnosticLog.textContent = state.diagnosticLines.join('\n') || 'Aguardando teste...';
+          els.diagnosticLog.scrollTop = els.diagnosticLog.scrollHeight;
+        }
+      }
+
+      function clearDiagnostics() {
+        state.diagnosticLines = [];
+        if (els.diagnosticLog) els.diagnosticLog.textContent = 'Log limpo. Clique em “Teste técnico da transcrição”.';
+        updateDiagnostics(state.lastRecognitionError || '');
+        showToast('Log limpo', 'O diagnóstico técnico foi reiniciado.', 'success');
+      }
+
+      async function copyDiagnostics() {
+        const text = [
+          'Diagnóstico da página de transcrição',
+          'URL: ' + location.href,
+          'Origem: ' + location.origin,
+          'Contexto seguro: ' + window.isSecureContext,
+          'SpeechRecognition disponível: ' + Boolean(SpeechRecognition),
+          'Idioma selecionado: ' + (els.languageSelect ? els.languageSelect.value : 'indisponível'),
+          'Modo selecionado: ' + (els.captureMode ? els.captureMode.value : 'indisponível'),
+          'Último erro: ' + (state.lastRecognitionError || 'nenhum'),
+          'User agent: ' + (navigator.userAgent || 'indisponível'),
+          '',
+          'LOG:',
+          state.diagnosticLines.join('\n') || 'sem eventos registrados'
+        ].join('\n');
+
+        try {
+          await navigator.clipboard.writeText(text);
+          showToast('Diagnóstico copiado', 'Cole esse conteúdo para análise técnica.', 'success');
+        } catch (_error) {
+          showToast('Não foi possível copiar', 'Selecione manualmente o log técnico e copie.', 'danger');
+        }
+      }
+
+      function attachRecognitionEventLoggers(recognition, label) {
+        const events = ['audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend', 'audioend', 'nomatch'];
+        events.forEach(eventName => {
+          try {
+            recognition.addEventListener(eventName, () => logDiagnostic(`${label}: evento ${eventName}.`, 'info'));
+          } catch (_error) {
+            // Alguns navegadores implementam SpeechRecognition parcialmente.
+          }
+        });
+      }
+
+      function testSpeechEngine() {
+        if (!SpeechRecognition) {
+          updateDiagnostics('API indisponível neste navegador');
+          logDiagnostic('Teste mínimo cancelado: SpeechRecognition indisponível.', 'error');
+          showToast('API indisponível', 'Use Google Chrome, Microsoft Edge ou Safari compatível.', 'danger');
+          return;
+        }
+
+        if (!window.isSecureContext) {
+          updateDiagnostics('contexto inseguro: acesse por HTTPS');
+          logDiagnostic('Teste mínimo cancelado: página sem contexto seguro.', 'error');
+          showToast('Conexão insegura', 'Abra a página com HTTPS para testar a transcrição.', 'danger');
+          return;
+        }
+
+        if (state.listening) {
+          showToast('Gravação ativa', 'Finalize ou pause a transcrição principal antes do teste técnico.', 'warning');
+          return;
+        }
+
+        let testRecognition;
+        try {
+          testRecognition = new SpeechRecognition();
+          testRecognition.lang = els.languageSelect.value || 'pt-BR';
+          testRecognition.continuous = false;
+          testRecognition.interimResults = false;
+          testRecognition.maxAlternatives = 1;
+          attachRecognitionEventLoggers(testRecognition, 'teste mínimo');
+        } catch (error) {
+          const detail = String((error && (error.message || error.name)) || error || 'erro desconhecido');
+          updateDiagnostics(detail);
+          logDiagnostic('Falha ao criar objeto de teste: ' + detail, 'error');
+          showToast('Falha no teste', 'O navegador não conseguiu criar o reconhecedor de fala.', 'danger');
+          return;
+        }
+
+        logDiagnostic('Teste mínimo iniciado. Fale uma frase curta nos próximos 10 segundos.', 'info');
+        showToast('Teste técnico iniciado', 'Fale uma frase curta. O resultado ou erro aparecerá no diagnóstico.', 'warning');
+
+        let finished = false;
+        const finish = () => { finished = true; window.clearTimeout(timeoutId); };
+        const timeoutId = window.setTimeout(() => {
+          if (finished) return;
+          logDiagnostic('Teste mínimo sem resposta em 12 segundos. Abortando captura.', 'warn');
+          try { testRecognition.abort(); } catch (_error) {}
+        }, 12000);
+
+        testRecognition.onstart = () => {
+          logDiagnostic('Teste mínimo: reconhecimento iniciado.', 'ok');
+        };
+
+        testRecognition.onresult = event => {
+          const result = event.results && event.results[0] && event.results[0][0] ? event.results[0][0].transcript : '';
+          logDiagnostic('Teste mínimo: resultado recebido: ' + (result || '[vazio]'), result ? 'ok' : 'warn');
+          if (result) showToast('Teste funcionou', 'O mecanismo de transcrição respondeu corretamente.', 'success');
+        };
+
+        testRecognition.onerror = event => {
+          const errorCode = event.error || 'desconhecido';
+          const message = mapRecognitionError(errorCode, event.message || '');
+          state.lastRecognitionError = `${errorCode}: ${message}`;
+          updateDiagnostics(state.lastRecognitionError);
+          logDiagnostic('Teste mínimo: erro ' + state.lastRecognitionError, 'error');
+          showToast('Teste falhou', message, 'danger');
+        };
+
+        testRecognition.onend = () => {
+          finish();
+          logDiagnostic('Teste mínimo: evento end.', 'info');
+        };
+
+        try {
+          testRecognition.start();
+        } catch (error) {
+          finish();
+          const detail = String((error && (error.message || error.name)) || error || 'erro desconhecido');
+          state.lastRecognitionError = detail;
+          updateDiagnostics(detail);
+          logDiagnostic('Teste mínimo: exceção ao iniciar: ' + detail, 'error');
+          showToast('Falha ao iniciar teste', 'Atualize a página e tente novamente.', 'danger');
+        }
       }
 
       async function inspectPermissionQuietly() {
@@ -1483,10 +1693,12 @@
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           stream.getTracks().forEach(track => track.stop());
           updateMicStatus('granted');
+          logDiagnostic('Verificação de microfone: permissão concedida por getUserMedia.', 'ok');
           if (showSuccessToast) showToast('Microfone verificado', 'Permissão concedida. Você já pode iniciar a transcrição.', 'success');
           return true;
         } catch (error) {
           updateMicStatus(error && error.name === 'NotFoundError' ? 'notfound' : 'denied');
+          logDiagnostic('Verificação de microfone falhou: ' + String((error && (error.name + ': ' + error.message)) || error || 'erro desconhecido'), 'error');
           showToast('Microfone bloqueado', 'Permita o acesso ao microfone no navegador para usar a transcrição.', 'danger');
           return false;
         } finally {
@@ -1509,6 +1721,8 @@
 
         if (state.listening) return;
 
+        logDiagnostic('Solicitação de início recebida pelo botão. Modo=' + (els.captureMode ? els.captureMode.value : 'standard') + ', idioma=' + (els.languageSelect.value || 'pt-BR') + '.', 'info');
+
         // Em páginas publicadas, iniciar o SpeechRecognition diretamente costuma ser mais estável do que abrir getUserMedia antes.
         // O botão “Verificar microfone” continua disponível como diagnóstico manual, mas não é mais uma etapa obrigatória.
         setupRecognition();
@@ -1522,6 +1736,7 @@
           const detail = String((error && (error.message || error.name)) || '').trim();
           if (detail.toLowerCase().includes('already')) return;
           state.lastRecognitionError = detail || 'falha ao iniciar o reconhecimento';
+          logDiagnostic('Exceção ao iniciar reconhecimento principal: ' + state.lastRecognitionError, 'error');
           updateDiagnostics(state.lastRecognitionError);
           showToast('Não foi possível iniciar', 'Feche outra captura de áudio aberta, atualize a página e tente novamente.', 'danger');
         }
