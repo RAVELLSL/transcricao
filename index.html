@@ -995,6 +995,15 @@
               </select>
             </div>
 
+            <div class="field">
+              <label for="captureMode">Modo de captura</label>
+              <select id="captureMode">
+                <option value="standard" selected>Normal — contínuo</option>
+                <option value="compat">Compatibilidade — GitHub/navegador</option>
+              </select>
+              <small>Use o modo de compatibilidade se a página publicada apresentar erro ao iniciar a fala.</small>
+            </div>
+
             <div class="switch-row">
               <div class="switch-copy">
                 <span>Pontuação automática</span>
@@ -1105,6 +1114,13 @@
             <strong>Compatibilidade:</strong> o reconhecimento de voz funciona melhor no Google Chrome ou Microsoft Edge. Em alguns navegadores, o recurso pode não estar disponível.
           </div>
 
+          <div class="help-card" id="diagnosticCard">
+            <strong>Diagnóstico técnico:</strong><br />
+            <span id="secureStatus">Conexão: verificando...</span><br />
+            <span id="apiStatus">Reconhecimento: verificando...</span><br />
+            <span id="lastErrorStatus">Último erro: nenhum.</span>
+          </div>
+
           <div class="help-card">
             <strong>Último salvamento:</strong><br />
             <span id="saveStatus">Nenhum conteúdo salvo nesta sessão.</span>
@@ -1127,6 +1143,7 @@
         theme: 'transcricaoVoz.theme.v5',
         font: 'transcricaoVoz.font.v5',
         lang: 'transcricaoVoz.lang.v5',
+        captureMode: 'transcricaoVoz.captureMode.v6',
         autoPunctuation: 'transcricaoVoz.autoPunctuation.v5',
         punctuationMode: 'transcricaoVoz.punctuationMode.v5',
         copyOnStop: 'transcricaoVoz.copyOnStop.v5',
@@ -1156,6 +1173,7 @@
         paragraphCount: document.getElementById('paragraphCount'),
         readingTime: document.getElementById('readingTime'),
         languageSelect: document.getElementById('languageSelect'),
+        captureMode: document.getElementById('captureMode'),
         autoPunctuationToggle: document.getElementById('autoPunctuationToggle'),
         punctuationMode: document.getElementById('punctuationMode'),
         copyOnStopToggle: document.getElementById('copyOnStopToggle'),
@@ -1172,6 +1190,9 @@
         decreaseFontBtn: document.getElementById('decreaseFontBtn'),
         saveStatus: document.getElementById('saveStatus'),
         supportCard: document.getElementById('supportCard'),
+        secureStatus: document.getElementById('secureStatus'),
+        apiStatus: document.getElementById('apiStatus'),
+        lastErrorStatus: document.getElementById('lastErrorStatus'),
         toastZone: document.getElementById('toastZone')
       };
 
@@ -1187,6 +1208,7 @@
         autosaveId: null,
         history: [],
         lastSavedText: '',
+        lastRecognitionError: '',
         fontSize: 18
       };
 
@@ -1198,6 +1220,7 @@
         updateStats();
         updateControls();
         updateSupportWarning();
+        updateDiagnostics();
         inspectPermissionQuietly();
       }
 
@@ -1212,6 +1235,11 @@
         const savedLang = localStorage.getItem(STORAGE_KEYS.lang);
         if (savedLang && [...els.languageSelect.options].some(option => option.value === savedLang)) {
           els.languageSelect.value = savedLang;
+        }
+
+        const savedCaptureMode = localStorage.getItem(STORAGE_KEYS.captureMode);
+        if (savedCaptureMode && els.captureMode && [...els.captureMode.options].some(option => option.value === savedCaptureMode)) {
+          els.captureMode.value = savedCaptureMode;
         }
 
         const savedAuto = localStorage.getItem(STORAGE_KEYS.autoPunctuation);
@@ -1245,10 +1273,8 @@
         if (!SpeechRecognition) return;
 
         const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
+        applyRecognitionOptions(recognition);
         recognition.maxAlternatives = 1;
-        recognition.lang = els.languageSelect.value;
 
         recognition.onstart = () => {
           state.listening = true;
@@ -1281,15 +1307,27 @@
         };
 
         recognition.onerror = event => {
-          const message = mapRecognitionError(event.error);
-          if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          const errorCode = event.error || 'desconhecido';
+          const message = mapRecognitionError(errorCode, event.message || '');
+          state.lastRecognitionError = `${errorCode}: ${message}`;
+          updateDiagnostics(state.lastRecognitionError);
+
+          if (errorCode === 'not-allowed' || errorCode === 'service-not-allowed') {
             state.micPermission = 'denied';
             updateMicStatus('denied');
           }
+
+          if ((errorCode === 'network' || errorCode === 'service-not-allowed') && els.captureMode && els.captureMode.value === 'standard') {
+            els.captureMode.value = 'compat';
+            localStorage.setItem(STORAGE_KEYS.captureMode, 'compat');
+            showToast('Modo de compatibilidade ativado', 'O navegador rejeitou o modo contínuo. Clique em Retomar para tentar novamente no modo compatibilidade.', 'warning');
+          } else {
+            showToast('Falha no reconhecimento', message, 'danger');
+          }
+
           setRecordingState('error', 'Erro');
-          showToast('Falha no reconhecimento', message, 'danger');
           state.listening = false;
-          state.paused = false;
+          state.paused = true;
           stopTimer();
           updateControls();
         };
@@ -1340,9 +1378,18 @@
 
         els.languageSelect.addEventListener('change', () => {
           localStorage.setItem(STORAGE_KEYS.lang, els.languageSelect.value);
-          if (state.recognition) state.recognition.lang = els.languageSelect.value;
+          if (state.recognition) applyRecognitionOptions(state.recognition);
           showToast('Idioma atualizado', 'A alteração será usada nas próximas capturas.', 'success');
         });
+
+        if (els.captureMode) {
+          els.captureMode.addEventListener('change', () => {
+            localStorage.setItem(STORAGE_KEYS.captureMode, els.captureMode.value);
+            if (state.recognition && !state.listening) applyRecognitionOptions(state.recognition);
+            const label = els.captureMode.value === 'compat' ? 'compatibilidade' : 'normal contínuo';
+            showToast('Modo de captura atualizado', `Modo ${label} selecionado para a próxima transcrição.`, 'success');
+          });
+        }
 
         els.autoPunctuationToggle.addEventListener('change', () => {
           localStorage.setItem(STORAGE_KEYS.autoPunctuation, String(els.autoPunctuationToggle.checked));
@@ -1365,14 +1412,38 @@
       }
 
       function updateSupportWarning() {
+        if (!window.isSecureContext) {
+          els.supportCard.innerHTML = '<strong>Conexão insegura:</strong> publique e acesse a página por HTTPS. Em páginas sem contexto seguro, o navegador pode bloquear microfone e reconhecimento de voz.';
+          els.supportCard.style.borderColor = 'color-mix(in srgb, var(--danger) 30%, var(--border))';
+        }
+
         if (!SpeechRecognition) {
-          els.supportCard.innerHTML = '<strong>Reconhecimento indisponível:</strong> este navegador não oferece suporte ao recurso de transcrição por voz. Use Google Chrome ou Microsoft Edge.';
+          els.supportCard.innerHTML = '<strong>Reconhecimento indisponível:</strong> este navegador não oferece suporte ao recurso de transcrição por voz. Use Google Chrome ou Microsoft Edge atualizado.';
           els.supportCard.style.borderColor = 'color-mix(in srgb, var(--danger) 30%, var(--border))';
           els.startBtn.disabled = true;
           els.mainToggleBtn.disabled = true;
           els.checkMicBtn.disabled = true;
           updateMicStatus('unsupported');
         }
+      }
+
+      function updateDiagnostics(lastError = '') {
+        if (els.secureStatus) {
+          els.secureStatus.textContent = `Conexão: ${window.isSecureContext ? 'segura / HTTPS' : 'insegura / sem HTTPS'}`;
+        }
+        if (els.apiStatus) {
+          els.apiStatus.textContent = `Reconhecimento: ${SpeechRecognition ? 'API disponível no navegador' : 'API indisponível neste navegador'}`;
+        }
+        if (els.lastErrorStatus) {
+          els.lastErrorStatus.textContent = lastError ? `Último erro: ${lastError}` : 'Último erro: nenhum.';
+        }
+      }
+
+      function applyRecognitionOptions(recognition) {
+        const mode = els.captureMode ? els.captureMode.value : 'standard';
+        recognition.lang = els.languageSelect.value || 'pt-BR';
+        recognition.continuous = mode === 'standard';
+        recognition.interimResults = mode === 'standard';
       }
 
       async function inspectPermissionQuietly() {
@@ -1387,6 +1458,12 @@
       }
 
       async function requestMicPermission(showSuccessToast = false) {
+        if (!window.isSecureContext) {
+          updateDiagnostics('contexto inseguro: acesse a página por HTTPS');
+          showToast('Conexão insegura', 'Acesse a página publicada usando HTTPS para liberar microfone e reconhecimento de voz.', 'danger');
+          return false;
+        }
+
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           updateMicStatus('browser');
           showToast('Verificação não disponível', 'Este navegador não expõe a verificação direta do microfone.', 'warning');
@@ -1418,23 +1495,35 @@
       }
 
       async function startRecognition() {
-        if (!state.recognition) {
-          showToast('Recurso indisponível', 'Use Google Chrome ou Microsoft Edge para ativar a transcrição por voz.', 'danger');
+        if (!SpeechRecognition) {
+          showToast('Recurso indisponível', 'Use Google Chrome ou Microsoft Edge atualizado para ativar a transcrição por voz.', 'danger');
+          return;
+        }
+
+        if (!window.isSecureContext) {
+          updateDiagnostics('contexto inseguro: acesse a página por HTTPS');
+          setRecordingState('error', 'Erro');
+          showToast('Conexão insegura', 'Abra a página publicada com endereço começando por https://. Sem contexto seguro, o navegador bloqueia recursos de voz.', 'danger');
           return;
         }
 
         if (state.listening) return;
 
-        const allowed = await requestMicPermission(false);
-        if (!allowed) return;
+        // Em páginas publicadas, iniciar o SpeechRecognition diretamente costuma ser mais estável do que abrir getUserMedia antes.
+        // O botão “Verificar microfone” continua disponível como diagnóstico manual, mas não é mais uma etapa obrigatória.
+        setupRecognition();
 
         try {
-          state.recognition.lang = els.languageSelect.value;
+          applyRecognitionOptions(state.recognition);
           state.manualStop = false;
+          state.paused = false;
           state.recognition.start();
         } catch (error) {
-          if (String(error && error.message).toLowerCase().includes('already')) return;
-          showToast('Não foi possível iniciar', 'Feche outra captura de áudio aberta e tente novamente.', 'danger');
+          const detail = String((error && (error.message || error.name)) || '').trim();
+          if (detail.toLowerCase().includes('already')) return;
+          state.lastRecognitionError = detail || 'falha ao iniciar o reconhecimento';
+          updateDiagnostics(state.lastRecognitionError);
+          showToast('Não foi possível iniciar', 'Feche outra captura de áudio aberta, atualize a página e tente novamente.', 'danger');
         }
       }
 
@@ -1892,16 +1981,19 @@
         return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       }
 
-      function mapRecognitionError(error) {
+      function mapRecognitionError(error, browserMessage = '') {
         const messages = {
-          'no-speech': 'Nenhuma fala foi detectada. Verifique o microfone e tente novamente.',
-          'audio-capture': 'O navegador não conseguiu capturar áudio do microfone.',
-          'not-allowed': 'A permissão do microfone foi bloqueada.',
-          'service-not-allowed': 'O serviço de reconhecimento de voz foi bloqueado pelo navegador.',
-          'network': 'O reconhecimento de voz depende do serviço do navegador e encontrou falha de rede.',
-          'aborted': 'A captura de voz foi interrompida.'
+          'no-speech': 'Nenhuma fala foi detectada. Fale mais próximo do microfone e tente novamente.',
+          'audio-capture': 'O navegador não conseguiu capturar áudio do microfone. Verifique se outro aplicativo está usando o microfone.',
+          'not-allowed': 'A permissão do microfone foi bloqueada neste site. Libere o microfone no ícone ao lado da barra de endereço.',
+          'service-not-allowed': 'O serviço de reconhecimento de voz foi bloqueado pelo navegador ou pela política do ambiente. Tente o modo de compatibilidade, Chrome/Edge atualizado e acesso por HTTPS.',
+          'network': 'Falha de rede no serviço de reconhecimento de voz do navegador. Tente atualizar a página, usar Chrome/Edge, desativar VPN/extensões que bloqueiam rede ou selecionar o modo de compatibilidade.',
+          'aborted': 'A captura de voz foi interrompida.',
+          'language-not-supported': 'O idioma selecionado não foi aceito pelo serviço de reconhecimento.',
+          'language-unavailable': 'O idioma selecionado não está disponível neste navegador.'
         };
-        return messages[error] || 'Ocorreu um erro ao tentar reconhecer a fala.';
+        const base = messages[error] || 'Ocorreu um erro ao tentar reconhecer a fala.';
+        return browserMessage ? `${base} Detalhe do navegador: ${browserMessage}` : base;
       }
 
       function showToast(title, message, type = 'success') {
